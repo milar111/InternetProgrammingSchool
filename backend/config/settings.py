@@ -41,6 +41,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'accounts',
     'questions',
+    'games',
 ]
 
 AUTH_USER_MODEL = 'accounts.User'
