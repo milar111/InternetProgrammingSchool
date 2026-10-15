@@ -219,3 +219,100 @@ class RoundAnswer(models.Model):
             elif self.round.question_type == NUMERIC:
                 if self.selected_option_id:
                     raise ValidationError("Selected option cannot be submitted for a numeric question round.")
+
+
+class Territory(models.Model):
+    game = models.ForeignKey(
+        Game,
+        on_delete=models.CASCADE,
+        related_name="territories",
+    )
+    name = models.CharField(max_length=100)
+    slug = models.SlugField(max_length=100)
+    owner = models.ForeignKey(
+        GamePlayer,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="territories",
+    )
+    score = models.IntegerField(default=0)
+    neighbors = models.ManyToManyField(
+        "self",
+        symmetrical=True,
+        blank=True,
+    )
+
+    class Meta:
+        ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["game", "name"],
+                name="unique_game_territory_name",
+            ),
+            models.UniqueConstraint(
+                fields=["game", "slug"],
+                name="unique_game_territory_slug",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.name} (Game #{self.game_id})"
+
+    def clean(self):
+        super().clean()
+        if not self.name or not self.name.strip():
+            raise ValidationError("Territory name cannot be empty.")
+        if not self.slug or not self.slug.strip():
+            raise ValidationError("Territory slug cannot be empty.")
+
+        self.name = self.name.strip()
+        self.slug = self.slug.strip().lower()
+
+        if self.score < 0:
+            raise ValidationError("Territory score must be non-negative.")
+
+        if self.owner_id and self.game_id:
+            if self.owner.game_id != self.game_id:
+                raise ValidationError("Territory owner must belong to the same game.")
+
+        if self.pk:
+            for neighbor in self.neighbors.all():
+                if neighbor.game_id != self.game_id:
+                    raise ValidationError("Neighbors must belong to the same game.")
+
+
+class Capital(models.Model):
+    territory = models.OneToOneField(
+        Territory,
+        on_delete=models.CASCADE,
+        related_name="capital",
+    )
+    player = models.OneToOneField(
+        GamePlayer,
+        on_delete=models.CASCADE,
+        related_name="capital",
+    )
+    health = models.PositiveSmallIntegerField(default=3)
+
+    class Meta:
+        ordering = ["territory__name"]
+
+    def __str__(self):
+        return f"Capital of {self.player.user.username} at {self.territory.name} (HP: {self.health})"
+
+    @property
+    def game(self):
+        return self.territory.game if self.territory_id else None
+
+    def clean(self):
+        super().clean()
+        if self.health < 0 or self.health > 3:
+            raise ValidationError("Capital health must be between 0 and 3.")
+
+        if self.territory_id and self.player_id:
+            if self.player.game_id != self.territory.game_id:
+                raise ValidationError("Capital player and territory must belong to the same game.")
+            if self.territory.owner_id != self.player_id:
+                raise ValidationError("Capital territory owner must match the capital player.")
+

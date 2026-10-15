@@ -3,7 +3,13 @@ from django.db.models import ProtectedError
 from django.test import TestCase
 from django.utils import timezone
 
-from games.models import Game, GamePlayer, Round, RoundAnswer
+from games.models import Capital, Game, GamePlayer, Round, RoundAnswer, Territory
+from games.map import (
+    get_game_territories,
+    get_player_capital,
+    get_player_territories,
+    get_territory_capital,
+)
 from questions.models import AnswerOption, Category, ChoiceQuestion, NumericQuestion
 
 User = get_user_model()
@@ -247,3 +253,127 @@ class RoundAnswerModelTests(TestCase):
         )
         self.player.delete()
         self.assertFalse(RoundAnswer.objects.filter(id=answer.id).exists())
+
+
+class TerritoryModelTests(TestCase):
+    def setUp(self):
+        self.host = User.objects.create_user(username="host", email="host@example.com", password="pwd")
+        self.game = Game.objects.create(created_by=self.host)
+        self.player = GamePlayer.objects.create(game=self.game, user=self.host, player_order=1)
+
+    def test_create_territory_defaults(self):
+        territory = Territory.objects.create(
+            game=self.game,
+            name="София",
+            slug="sofia",
+        )
+        self.assertEqual(territory.score, 0)
+        self.assertIsNone(territory.owner)
+        self.assertIn("София", str(territory))
+        self.assertEqual(territory.neighbors.count(), 0)
+
+    def test_territory_owner_assignment(self):
+        territory = Territory.objects.create(
+            game=self.game,
+            name="Варна",
+            slug="varna",
+            owner=self.player,
+        )
+        self.assertEqual(territory.owner, self.player)
+        self.assertIn(territory, self.player.territories.all())
+
+    def test_territory_neighbors_symmetry(self):
+        t1 = Territory.objects.create(game=self.game, name="София", slug="sofia")
+        t2 = Territory.objects.create(game=self.game, name="Враца", slug="vratsa")
+        t1.neighbors.add(t2)
+
+        self.assertIn(t2, t1.neighbors.all())
+        self.assertIn(t1, t2.neighbors.all())
+
+    def test_deleting_game_cascades_to_territories(self):
+        territory = Territory.objects.create(game=self.game, name="Русе", slug="ruse")
+        self.game.delete()
+        self.assertFalse(Territory.objects.filter(id=territory.id).exists())
+
+    def test_deleting_player_sets_territory_owner_to_null(self):
+        territory = Territory.objects.create(
+            game=self.game,
+            name="Плевен",
+            slug="pleven",
+            owner=self.player,
+        )
+        self.player.delete()
+        territory.refresh_from_db()
+        self.assertIsNone(territory.owner)
+
+    def test_territory_query_helpers(self):
+        t1 = Territory.objects.create(game=self.game, name="Видин", slug="vidin", owner=self.player)
+        t2 = Territory.objects.create(game=self.game, name="Лом", slug="lom")
+
+        game_territories = get_game_territories(self.game)
+        self.assertEqual(game_territories.count(), 2)
+
+        player_territories = get_player_territories(self.player)
+        self.assertEqual(player_territories.count(), 1)
+        self.assertEqual(player_territories.first(), t1)
+
+
+class CapitalModelTests(TestCase):
+    def setUp(self):
+        self.host = User.objects.create_user(username="host", email="host@example.com", password="pwd")
+        self.game = Game.objects.create(created_by=self.host)
+        self.player = GamePlayer.objects.create(game=self.game, user=self.host, player_order=1)
+        self.territory = Territory.objects.create(
+            game=self.game,
+            name="Пловдив",
+            slug="plovdiv",
+            owner=self.player,
+        )
+
+    def test_create_capital_defaults(self):
+        capital = Capital.objects.create(
+            territory=self.territory,
+            player=self.player,
+        )
+        self.assertEqual(capital.health, 3)
+        self.assertEqual(capital.game, self.game)
+        self.assertIn("Пловдив", str(capital))
+        self.assertEqual(self.player.capital, capital)
+        self.assertEqual(self.territory.capital, capital)
+
+    def test_capital_query_helpers(self):
+        self.assertIsNone(get_player_capital(self.player))
+        self.assertIsNone(get_territory_capital(self.territory))
+
+        capital = Capital.objects.create(
+            territory=self.territory,
+            player=self.player,
+        )
+
+        self.assertEqual(get_player_capital(self.player), capital)
+        self.assertEqual(get_territory_capital(self.territory), capital)
+
+    def test_deleting_territory_cascades_to_capital(self):
+        capital = Capital.objects.create(
+            territory=self.territory,
+            player=self.player,
+        )
+        self.territory.delete()
+        self.assertFalse(Capital.objects.filter(id=capital.id).exists())
+
+    def test_deleting_player_cascades_to_capital(self):
+        capital = Capital.objects.create(
+            territory=self.territory,
+            player=self.player,
+        )
+        self.player.delete()
+        self.assertFalse(Capital.objects.filter(id=capital.id).exists())
+
+    def test_deleting_game_cascades_to_capital(self):
+        capital = Capital.objects.create(
+            territory=self.territory,
+            player=self.player,
+        )
+        self.game.delete()
+        self.assertFalse(Capital.objects.filter(id=capital.id).exists())
+

@@ -3,7 +3,7 @@ from django.core.exceptions import ValidationError
 from django.db import IntegrityError
 from django.test import TestCase
 
-from games.models import Game, GamePlayer, Round, RoundAnswer
+from games.models import Capital, Game, GamePlayer, Round, RoundAnswer, Territory
 from questions.models import AnswerOption, Category, ChoiceQuestion, NumericQuestion
 
 User = get_user_model()
@@ -240,3 +240,122 @@ class RoundAnswerConstraintAndValidationTests(TestCase):
             numeric_value=10,
         )
         numeric_ans.clean()
+
+
+class TerritoryConstraintAndValidationTests(TestCase):
+    def setUp(self):
+        self.host = User.objects.create_user(username="host", email="host@example.com", password="pwd")
+        self.game1 = Game.objects.create(created_by=self.host)
+        self.game2 = Game.objects.create(created_by=self.host)
+
+        self.player_g1 = GamePlayer.objects.create(game=self.game1, user=self.host, player_order=1)
+        self.player_g2 = GamePlayer.objects.create(game=self.game2, user=self.host, player_order=1)
+
+    def test_unique_game_territory_name(self):
+        Territory.objects.create(game=self.game1, name="София", slug="sofia")
+        with self.assertRaises(IntegrityError):
+            Territory.objects.create(game=self.game1, name="София", slug="sofia-2")
+
+    def test_unique_game_territory_slug(self):
+        Territory.objects.create(game=self.game1, name="София 1", slug="sofia")
+        with self.assertRaises(IntegrityError):
+            Territory.objects.create(game=self.game1, name="София 2", slug="sofia")
+
+    def test_same_name_and_slug_allowed_in_different_games(self):
+        t1 = Territory.objects.create(game=self.game1, name="София", slug="sofia")
+        t2 = Territory.objects.create(game=self.game2, name="София", slug="sofia")
+        self.assertEqual(t1.slug, t2.slug)
+        self.assertNotEqual(t1.game_id, t2.game_id)
+
+    def test_territory_empty_name_or_slug_validation(self):
+        t_no_name = Territory(game=self.game1, name="   ", slug="sofia")
+        with self.assertRaises(ValidationError):
+            t_no_name.clean()
+
+        t_no_slug = Territory(game=self.game1, name="София", slug="   ")
+        with self.assertRaises(ValidationError):
+            t_no_slug.clean()
+
+    def test_territory_negative_score_validation(self):
+        territory = Territory(game=self.game1, name="София", slug="sofia", score=-10)
+        with self.assertRaises(ValidationError):
+            territory.clean()
+
+    def test_territory_owner_must_belong_to_same_game(self):
+        territory = Territory(
+            game=self.game1,
+            name="София",
+            slug="sofia",
+            owner=self.player_g2,
+        )
+        with self.assertRaises(ValidationError):
+            territory.clean()
+
+    def test_territory_neighbors_must_belong_to_same_game(self):
+        t1 = Territory.objects.create(game=self.game1, name="София", slug="sofia")
+        t2_other_game = Territory.objects.create(game=self.game2, name="Враца", slug="vratsa")
+        t1.neighbors.add(t2_other_game)
+
+        with self.assertRaises(ValidationError):
+            t1.clean()
+
+    def test_territory_slug_normalized(self):
+        territory = Territory(game=self.game1, name=" София ", slug=" SOFIA ")
+        territory.clean()
+        self.assertEqual(territory.name, "София")
+        self.assertEqual(territory.slug, "sofia")
+
+
+class CapitalConstraintAndValidationTests(TestCase):
+    def setUp(self):
+        self.user1 = User.objects.create_user(username="u1", email="u1@example.com", password="pwd")
+        self.user2 = User.objects.create_user(username="u2", email="u2@example.com", password="pwd")
+
+        self.game1 = Game.objects.create(created_by=self.user1)
+        self.game2 = Game.objects.create(created_by=self.user2)
+
+        self.player1_g1 = GamePlayer.objects.create(game=self.game1, user=self.user1, player_order=1)
+        self.player2_g1 = GamePlayer.objects.create(game=self.game1, user=self.user2, player_order=2)
+        self.player_g2 = GamePlayer.objects.create(game=self.game2, user=self.user1, player_order=1)
+
+        self.t1_g1 = Territory.objects.create(game=self.game1, name="София", slug="sofia", owner=self.player1_g1)
+        self.t2_g1 = Territory.objects.create(game=self.game1, name="Пловдив", slug="plovdiv", owner=self.player2_g1)
+        self.t_g2 = Territory.objects.create(game=self.game2, name="Варна", slug="varna", owner=self.player_g2)
+
+    def test_one_capital_per_territory(self):
+        Capital.objects.create(territory=self.t1_g1, player=self.player1_g1)
+        with self.assertRaises(IntegrityError):
+            Capital.objects.create(territory=self.t1_g1, player=self.player2_g1)
+
+    def test_one_capital_per_player(self):
+        Capital.objects.create(territory=self.t1_g1, player=self.player1_g1)
+        with self.assertRaises(IntegrityError):
+            Capital.objects.create(territory=self.t2_g1, player=self.player1_g1)
+
+    def test_capital_health_validation(self):
+        cap_low = Capital(territory=self.t1_g1, player=self.player1_g1, health=-1)
+        with self.assertRaises(ValidationError):
+            cap_low.clean()
+
+        cap_high = Capital(territory=self.t1_g1, player=self.player1_g1, health=4)
+        with self.assertRaises(ValidationError):
+            cap_high.clean()
+
+        for h in [0, 1, 2, 3]:
+            cap = Capital(territory=self.t1_g1, player=self.player1_g1, health=h)
+            cap.clean()
+
+    def test_capital_player_and_territory_must_belong_to_same_game(self):
+        capital = Capital(territory=self.t1_g1, player=self.player_g2)
+        with self.assertRaises(ValidationError):
+            capital.clean()
+
+    def test_capital_owner_must_match_player(self):
+        capital = Capital(territory=self.t1_g1, player=self.player2_g1)
+        with self.assertRaises(ValidationError):
+            capital.clean()
+
+    def test_valid_capital_passes_clean(self):
+        capital = Capital(territory=self.t1_g1, player=self.player1_g1, health=3)
+        capital.clean()
+

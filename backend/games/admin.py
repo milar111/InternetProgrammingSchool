@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Game, GamePlayer, Round, RoundAnswer
+from .models import Capital, Game, GamePlayer, Round, RoundAnswer, Territory
 
 
 class GamePlayerInline(admin.TabularInline):
@@ -45,3 +45,43 @@ class RoundAnswerAdmin(admin.ModelAdmin):
     list_display = ("id", "round", "player", "is_correct", "points_awarded", "submitted_at")
     list_filter = ("is_correct",)
     search_fields = ("player__user__username",)
+
+
+@admin.register(Territory)
+class TerritoryAdmin(admin.ModelAdmin):
+    list_display = ("id", "game", "name", "slug", "owner", "score", "get_neighbors")
+    search_fields = ("name", "slug")
+    list_filter = ("game", "owner")
+    readonly_fields = ("game", "name", "slug", "owner", "neighbors")
+    actions = None
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def get_neighbors(self, obj):
+        return ", ".join(t.name for t in obj.neighbors.all())
+
+    get_neighbors.short_description = "Neighbors"
+
+
+@admin.register(Capital)
+class CapitalAdmin(admin.ModelAdmin):
+    list_display = ("id", "get_game", "player", "territory", "health")
+    search_fields = ("player__user__username", "territory__name", "territory__slug")
+    list_filter = ("territory__game",)
+    readonly_fields = ("player", "territory")
+    actions = None
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def get_game(self, obj):
+        return obj.game
+
+    get_game.short_description = "Game"
