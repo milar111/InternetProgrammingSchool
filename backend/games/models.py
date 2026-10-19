@@ -4,12 +4,14 @@ from django.db import models
 
 
 WAITING = "waiting"
+ACTIVE = "active"
 IN_PROGRESS = "in_progress"
 FINISHED = "finished"
 CANCELLED = "cancelled"
 
 STATUS_CHOICES = [
     (WAITING, "Waiting"),
+    (ACTIVE, "Active"),
     (IN_PROGRESS, "In Progress"),
     (FINISHED, "Finished"),
     (CANCELLED, "Cancelled"),
@@ -38,6 +40,7 @@ QUESTION_TYPE_CHOICES = [
 
 class Game(models.Model):
     WAITING = WAITING
+    ACTIVE = ACTIVE
     IN_PROGRESS = IN_PROGRESS
     FINISHED = FINISHED
     CANCELLED = CANCELLED
@@ -63,8 +66,44 @@ class Game(models.Model):
     def __str__(self):
         return f"Game #{self.id} ({self.status})"
 
+    def clean(self):
+        super().clean()
+        if self.status in (self.ACTIVE, self.IN_PROGRESS):
+            if not self.pk:
+                raise ValidationError("Cannot create a new game directly in active status.")
+            if self.territories.count() != 15 or Capital.objects.filter(territory__game=self).count() != 3:
+                raise ValidationError(
+                    "Game cannot transition to active status without successful initialization of map territories and capitals."
+                )
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            orig = Game.objects.filter(pk=self.pk).values("status").first()
+            if orig and orig["status"] == self.WAITING and self.status in (self.ACTIVE, self.IN_PROGRESS):
+                if self.territories.count() != 15 or Capital.objects.filter(territory__game=self).count() != 3:
+                    raise ValidationError(
+                        "Cannot transition game from waiting to active without initialization."
+                    )
+        super().save(*args, **kwargs)
+
+    def initialize(self, *, seed=None, capital_triplet=None):
+        from .services import initialize_game
+        result = initialize_game(self, seed=seed, capital_triplet=capital_triplet)
+        self.refresh_from_db()
+        return result
+
 
 class GamePlayer(models.Model):
+    RED = "red"
+    GREEN = "green"
+    BLUE = "blue"
+
+    COLOR_CHOICES = [
+        (RED, "Red"),
+        (GREEN, "Green"),
+        (BLUE, "Blue"),
+    ]
+
     game = models.ForeignKey(
         Game,
         on_delete=models.CASCADE,
@@ -77,6 +116,12 @@ class GamePlayer(models.Model):
     )
     player_order = models.PositiveSmallIntegerField()
     score = models.IntegerField(default=0)
+    color = models.CharField(
+        max_length=20,
+        choices=COLOR_CHOICES,
+        blank=True,
+        default="",
+    )
     is_active = models.BooleanField(default=True)
     joined_at = models.DateTimeField(auto_now_add=True)
 
@@ -91,10 +136,62 @@ class GamePlayer(models.Model):
                 fields=["game", "player_order"],
                 name="unique_game_player_order",
             ),
+            models.UniqueConstraint(
+                fields=["game", "color"],
+                condition=models.Q(color__gt=""),
+                name="unique_game_player_color",
+            ),
         ]
 
     def __str__(self):
         return f"{self.user.username} in Game #{self.game_id} (order {self.player_order})"
+
+    def clean(self):
+        super().clean()
+        if self.score < 0:
+            raise ValidationError("Player score must be non-negative.")
+        if self.color:
+            allowed = [c[0] for c in self.COLOR_CHOICES]
+            if self.color not in allowed:
+                raise ValidationError(f"Invalid player color '{self.color}'. Allowed colors: {allowed}.")
+        if self.game_id:
+            if not self.pk and self.game.status != Game.WAITING:
+                raise ValidationError("Cannot add players to a game that is not in waiting status.")
+            if self.pk and self.game.status != Game.WAITING:
+                orig = GamePlayer.objects.filter(pk=self.pk).values("game_id", "user_id", "player_order").first()
+                if orig:
+                    if orig["game_id"] != self.game_id:
+                        raise ValidationError("Cannot move player to a different game.")
+                    if orig["user_id"] != self.user_id:
+                        raise ValidationError("Cannot change user of a player once the game has started.")
+                    if orig["player_order"] != self.player_order:
+                        raise ValidationError("Cannot change player order once the game has started.")
+
+    def save(self, *args, **kwargs):
+        if self.game_id:
+            if not self.pk and self.game.status != Game.WAITING:
+                raise ValidationError("Cannot add players to a game that is not in waiting status.")
+            if self.pk and self.game.status != Game.WAITING:
+                orig = GamePlayer.objects.filter(pk=self.pk).values("game_id", "user_id", "player_order").first()
+                if orig:
+                    if orig["game_id"] != self.game_id:
+                        raise ValidationError("Cannot move player to a different game.")
+                    if orig["user_id"] != self.user_id:
+                        raise ValidationError("Cannot change user of a player once the game has started.")
+                    if orig["player_order"] != self.player_order:
+                        raise ValidationError("Cannot change player order once the game has started.")
+        if self.score < 0:
+            raise ValidationError("Player score must be non-negative.")
+        if self.color:
+            allowed = [c[0] for c in self.COLOR_CHOICES]
+            if self.color not in allowed:
+                raise ValidationError(f"Invalid player color '{self.color}'. Allowed colors: {allowed}.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.game_id and self.game.status != Game.WAITING:
+            raise ValidationError("Cannot remove players from an active, finished, or cancelled game.")
+        return super().delete(*args, **kwargs)
 
 
 class Round(models.Model):

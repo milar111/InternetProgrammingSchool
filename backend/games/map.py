@@ -40,6 +40,25 @@ BULGARIA_MAP_ADJACENCY = {
 SAMPLE_CAPITAL_TRIPLET = ("vidin", "varna", "blagoevgrad")
 
 
+def find_all_independent_triplets(adjacency=BULGARIA_MAP_ADJACENCY):
+    """
+    Returns a sorted list of all unique triplets (slug1, slug2, slug3) of territories
+    that are mutually non-adjacent (no edges between any pair in the triplet).
+    """
+    slugs = sorted(adjacency.keys())
+    triplets = []
+    n = len(slugs)
+    for i in range(n):
+        for j in range(i + 1, n):
+            for k in range(j + 1, n):
+                a, b, c = slugs[i], slugs[j], slugs[k]
+                adj_a = set(adjacency.get(a, []))
+                adj_b = set(adjacency.get(b, []))
+                if b not in adj_a and c not in adj_a and c not in adj_b:
+                    triplets.append((a, b, c))
+    return triplets
+
+
 def validate_map_definition(territories=BULGARIA_MAP_TERRITORIES, adjacency=BULGARIA_MAP_ADJACENCY):
     errors = []
     count = len(territories)
@@ -94,23 +113,7 @@ def validate_map_definition(territories=BULGARIA_MAP_TERRITORIES, adjacency=BULG
         if visited != slug_set:
             errors.append("The map graph is not fully connected.")
 
-    has_independent_triplet = False
-    slug_list = list(slug_set)
-    for i in range(len(slug_list)):
-        for j in range(i + 1, len(slug_list)):
-            for k in range(j + 1, len(slug_list)):
-                a, b, c = slug_list[i], slug_list[j], slug_list[k]
-                adj_a = set(adjacency.get(a, []))
-                adj_b = set(adjacency.get(b, []))
-                if b not in adj_a and c not in adj_a and c not in adj_b:
-                    has_independent_triplet = True
-                    break
-            if has_independent_triplet:
-                break
-        if has_independent_triplet:
-            break
-
-    if not has_independent_triplet:
+    if not find_all_independent_triplets(adjacency):
         errors.append("Map must have at least one triplet of territories with no edges between any of them.")
 
     if errors:

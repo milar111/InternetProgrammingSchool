@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 from django.db.models import ProtectedError
 from django.test import TestCase
 from django.utils import timezone
@@ -35,15 +36,34 @@ class GameModelTests(TestCase):
         game = Game.objects.create(created_by=self.user)
         now = timezone.now()
 
-        game.status = Game.IN_PROGRESS
-        game.started_at = now
-        game.save()
-        self.assertEqual(game.status, Game.IN_PROGRESS)
+        # Cannot directly transition to active without initialization
+        game.status = Game.ACTIVE
+        with self.assertRaises(ValidationError):
+            game.save()
 
-        game.status = Game.FINISHED
-        game.finished_at = now
+        # Waiting game can be cancelled
+        game.status = Game.CANCELLED
         game.save()
-        self.assertEqual(game.status, Game.FINISHED)
+        self.assertEqual(game.status, Game.CANCELLED)
+
+        # A waiting game with 3 valid players transitions to ACTIVE via initialization
+        game2 = Game.objects.create(created_by=self.user)
+        u1 = User.objects.create_user(username="p1", email="p1@example.com", password="pwd")
+        u2 = User.objects.create_user(username="p2", email="p2@example.com", password="pwd")
+        u3 = User.objects.create_user(username="p3", email="p3@example.com", password="pwd")
+        GamePlayer.objects.create(game=game2, user=u1, player_order=1, color="red")
+        GamePlayer.objects.create(game=game2, user=u2, player_order=2, color="green")
+        GamePlayer.objects.create(game=game2, user=u3, player_order=3, color="blue")
+
+        game2.initialize(seed=1)
+        self.assertEqual(game2.status, Game.ACTIVE)
+        self.assertIsNotNone(game2.started_at)
+
+        # Active game can transition to FINISHED
+        game2.status = Game.FINISHED
+        game2.finished_at = now
+        game2.save()
+        self.assertEqual(game2.status, Game.FINISHED)
 
     def test_game_created_by_protect(self):
         Game.objects.create(created_by=self.user)
