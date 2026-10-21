@@ -413,3 +413,12 @@ class Capital(models.Model):
             if self.territory.owner_id != self.player_id:
                 raise ValidationError("Capital territory owner must match the capital player.")
 
+
+class WaitingPlayer(models.Model):
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="waiting_entry")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.user.username
+
+

@@ -1,5 +1,21 @@
 from django.contrib import admin
-from .models import Capital, Game, GamePlayer, Round, RoundAnswer, Territory
+from .models import Capital, Game, GamePlayer, Round, RoundAnswer, Territory, WaitingPlayer
+
+
+@admin.register(WaitingPlayer)
+class WaitingPlayerAdmin(admin.ModelAdmin):
+    list_display = ("id", "user", "created_at")
+    search_fields = ("user__username",)
+    actions = ["form_game_action"]
+
+    @admin.action(description="form game")
+    def form_game_action(self, request, queryset):
+        from .waiting_room import form_game
+        newGame = form_game()
+        if newGame: self.message_user(request, f"game #{newGame.id} started")
+        else: self.message_user(request, "need at least 3 players", level="warning")
+
+
 
 
 class GamePlayerInline(admin.TabularInline):
