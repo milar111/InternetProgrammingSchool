@@ -1,5 +1,15 @@
 from django.contrib import admin
-from .models import Capital, Game, GamePlayer, Round, RoundAnswer, Territory, WaitingPlayer
+from .models import (
+    Capital,
+    Game,
+    GamePlayer,
+    Round,
+    RoundAnswer,
+    RoundQuestion,
+    RoundRanking,
+    Territory,
+    WaitingPlayer,
+)
 
 
 @admin.register(WaitingPlayer)
@@ -88,12 +98,36 @@ class GamePlayerAdmin(admin.ModelAdmin):
         return ()
 
 
+class RoundQuestionInline(admin.TabularInline):
+    model = RoundQuestion
+    extra = 0
+
+
+class RoundRankingInline(admin.TabularInline):
+    model = RoundRanking
+    extra = 0
+
+
 @admin.register(Round)
 class RoundAdmin(admin.ModelAdmin):
-    list_display = ("id", "game", "number", "status", "question_type", "started_at", "finished_at")
-    list_filter = ("status", "question_type")
-    search_fields = ("game__id",)
-    inlines = [RoundAnswerInline]
+    list_display = ("id", "game", "number", "status", "round_type", "winner", "started_at", "completed_at")
+    list_filter = ("status", "round_type", "question_type")
+    search_fields = ("game__id", "winner__user__username")
+    inlines = [RoundQuestionInline, RoundAnswerInline, RoundRankingInline]
+
+
+@admin.register(RoundQuestion)
+class RoundQuestionAdmin(admin.ModelAdmin):
+    list_display = ("id", "round", "order", "status", "correct_answer", "started_at", "deadline")
+    list_filter = ("status", "order")
+    search_fields = ("round__id", "question__text")
+
+
+@admin.register(RoundRanking)
+class RoundRankingAdmin(admin.ModelAdmin):
+    list_display = ("id", "round", "place", "player", "difference", "submitted_at")
+    list_filter = ("place",)
+    search_fields = ("player__user__username", "round__id")
 
 
 @admin.register(RoundAnswer)

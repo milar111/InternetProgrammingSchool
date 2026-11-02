@@ -19,14 +19,18 @@ STATUS_CHOICES = [
 
 PENDING = "pending"
 OPEN = "open"
+ACTIVE = "active"
 CLOSED = "closed"
 EVALUATED = "evaluated"
+COMPLETED = "completed"
 
 ROUND_STATUS_CHOICES = [
     (PENDING, "Pending"),
     (OPEN, "Open"),
+    (ACTIVE, "Active"),
     (CLOSED, "Closed"),
     (EVALUATED, "Evaluated"),
+    (COMPLETED, "Completed"),
 ]
 
 CHOICE = "choice"
@@ -91,6 +95,9 @@ class Game(models.Model):
         result = initialize_game(self, seed=seed, capital_triplet=capital_triplet)
         self.refresh_from_db()
         return result
+
+    def get_current_round(self):
+        return self.rounds.order_by("-number").first()
 
 
 class GamePlayer(models.Model):
@@ -197,13 +204,20 @@ class GamePlayer(models.Model):
 class Round(models.Model):
     PENDING = PENDING
     OPEN = OPEN
+    ACTIVE = ACTIVE
     CLOSED = CLOSED
     EVALUATED = EVALUATED
+    COMPLETED = COMPLETED
     ROUND_STATUS_CHOICES = ROUND_STATUS_CHOICES
 
     CHOICE = CHOICE
     NUMERIC = NUMERIC
     QUESTION_TYPE_CHOICES = QUESTION_TYPE_CHOICES
+
+    CITY_CAPTURE = "city_capture"
+    ROUND_TYPE_CHOICES = [
+        (CITY_CAPTURE, "City Capture"),
+    ]
 
     game = models.ForeignKey(
         Game,
@@ -216,9 +230,15 @@ class Round(models.Model):
         choices=ROUND_STATUS_CHOICES,
         default=PENDING,
     )
+    round_type = models.CharField(
+        max_length=50,
+        choices=ROUND_TYPE_CHOICES,
+        default=CITY_CAPTURE,
+    )
     question_type = models.CharField(
         max_length=20,
         choices=QUESTION_TYPE_CHOICES,
+        default=NUMERIC,
     )
     choice_question = models.ForeignKey(
         "questions.ChoiceQuestion",
@@ -234,8 +254,17 @@ class Round(models.Model):
         on_delete=models.PROTECT,
         related_name="rounds",
     )
+    winner = models.ForeignKey(
+        GamePlayer,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="won_rounds",
+    )
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    unresolved_reason = models.CharField(max_length=255, blank=True, default="")
 
     class Meta:
         ordering = ["number"]
@@ -262,10 +291,98 @@ class Round(models.Model):
             if self.choice_question_id:
                 raise ValidationError("Numeric round cannot have a choice question.")
 
+        if self.winner_id and self.game_id:
+            if self.winner.game_id != self.game_id:
+                raise ValidationError("Round winner must belong to the same game.")
+
+        if self.status in (PENDING, ACTIVE, OPEN):
+            if self.winner_id is not None:
+                raise ValidationError("Round winner cannot be assigned while round is pending or active.")
+            if self.completed_at is not None:
+                raise ValidationError("Round completed_at cannot be set while round is pending or active.")
+
+        if self.status == COMPLETED:
+            if not self.completed_at:
+                raise ValidationError("Completed round must have completed_at timestamp.")
+            if not self.winner_id and not self.unresolved_reason:
+                raise ValidationError("Completed round without a winner must have an unresolved_reason.")
+
+    def get_current_question(self):
+        return self.round_questions.order_by("-order").first()
+
+    def get_rankings(self):
+        return self.rankings.order_by("place")
+
+
+class RoundQuestion(models.Model):
+    PENDING = "pending"
+    ACTIVE = "active"
+    COMPLETED = "completed"
+    STATUS_CHOICES = [
+        (PENDING, "Pending"),
+        (ACTIVE, "Active"),
+        (COMPLETED, "Completed"),
+    ]
+
+    round = models.ForeignKey(
+        Round,
+        on_delete=models.CASCADE,
+        related_name="round_questions",
+    )
+    question = models.ForeignKey(
+        "questions.NumericQuestion",
+        on_delete=models.PROTECT,
+        related_name="round_questions",
+    )
+    question_text = models.TextField()
+    correct_answer = models.IntegerField()
+    order = models.PositiveSmallIntegerField(default=1)
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=PENDING,
+    )
+    target_players = models.ManyToManyField(
+        GamePlayer,
+        blank=True,
+        related_name="targeted_questions",
+    )
+    target_places = models.CharField(max_length=50, default="1,2")
+    started_at = models.DateTimeField(null=True, blank=True)
+    deadline = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["round", "order"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["round", "order"],
+                name="unique_round_question_order",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Round #{self.round.number} Question #{self.order} ({self.status})"
+
+    def clean(self):
+        super().clean()
+        if self.order < 1 or self.order > 3:
+            raise ValidationError("Question order must be between 1 and 3.")
+        if self.status == self.ACTIVE:
+            if not self.started_at or not self.deadline:
+                raise ValidationError("Active question must have started_at and deadline.")
+
 
 class RoundAnswer(models.Model):
     round = models.ForeignKey(
         Round,
+        on_delete=models.CASCADE,
+        related_name="answers",
+    )
+    round_question = models.ForeignKey(
+        RoundQuestion,
+        null=True,
+        blank=True,
         on_delete=models.CASCADE,
         related_name="answers",
     )
@@ -282,6 +399,7 @@ class RoundAnswer(models.Model):
         related_name="answers",
     )
     numeric_value = models.IntegerField(null=True, blank=True)
+    difference = models.IntegerField(null=True, blank=True)
     is_correct = models.BooleanField(null=True, blank=True)
     points_awarded = models.IntegerField(default=0)
     submitted_at = models.DateTimeField(null=True, blank=True)
@@ -291,7 +409,13 @@ class RoundAnswer(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["round", "player"],
+                condition=models.Q(round_question__isnull=True),
                 name="unique_round_player_answer",
+            ),
+            models.UniqueConstraint(
+                fields=["round_question", "player"],
+                condition=models.Q(round_question__isnull=False),
+                name="unique_question_player_answer",
             ),
         ]
 
@@ -302,6 +426,10 @@ class RoundAnswer(models.Model):
         super().clean()
         if self.player_id and self.round_id and self.player.game_id != self.round.game_id:
             raise ValidationError("Player must belong to the same game as the round.")
+
+        if self.round_question_id and self.round_id:
+            if self.round_question.round_id != self.round_id:
+                raise ValidationError("RoundQuestion must belong to the same round.")
 
         if self.selected_option_id and self.numeric_value is not None:
             raise ValidationError("Answer cannot have both a selected option and a numeric value.")
@@ -316,6 +444,52 @@ class RoundAnswer(models.Model):
             elif self.round.question_type == NUMERIC:
                 if self.selected_option_id:
                     raise ValidationError("Selected option cannot be submitted for a numeric question round.")
+
+
+class RoundRanking(models.Model):
+    round = models.ForeignKey(
+        Round,
+        on_delete=models.CASCADE,
+        related_name="rankings",
+    )
+    player = models.ForeignKey(
+        GamePlayer,
+        on_delete=models.CASCADE,
+        related_name="round_rankings",
+    )
+    place = models.PositiveSmallIntegerField()
+    resolved_at_question = models.ForeignKey(
+        RoundQuestion,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="resolved_rankings",
+    )
+    difference = models.IntegerField(null=True, blank=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["place"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["round", "place"],
+                name="unique_round_place",
+            ),
+            models.UniqueConstraint(
+                fields=["round", "player"],
+                name="unique_round_player_ranking",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Place {self.place}: {self.player.user.username} (Round #{self.round.number})"
+
+    def clean(self):
+        super().clean()
+        if self.place not in (1, 2):
+            raise ValidationError("Ranking place must be 1 or 2.")
+        if self.player_id and self.round_id and self.player.game_id != self.round.game_id:
+            raise ValidationError("Ranking player must belong to the round's game.")
 
 
 class Territory(models.Model):

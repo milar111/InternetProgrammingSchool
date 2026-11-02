@@ -201,3 +201,26 @@ def initialize_game(game_or_id, *, seed=None, capital_triplet=None):
             game_or_id.refresh_from_db()
 
         return game
+
+
+# Re-export Round Service Operations & Exceptions for M06
+from .round_services import (
+    AnswerDeadlineExpiredError,
+    DuplicateAnswerError,
+    InvalidAnswerValueError,
+    InvalidGameStateError,
+    InvalidRoundStateError,
+    NoQuestionsAvailableError,
+    PlayerNotEligibleError,
+    PlayerNotFoundError,
+    PrematureEvaluationError,
+    RoundAlreadyCompletedError,
+    RoundNotFoundError,
+    RoundServiceError,
+    UnfinishedRoundExistsError,
+    create_numeric_round,
+    evaluate_round,
+    get_round_state,
+    start_round,
+    submit_numeric_answer,
+)
