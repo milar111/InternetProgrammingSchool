@@ -55,7 +55,6 @@ class RoundAlreadyCompletedError(RoundServiceError):
     pass
 
 
-# 3. Невалиден вход (InvalidInput)
 class InvalidAnswerValueError(RoundServiceError):
     """Raised when the submitted answer is not a valid integer (float, bool, None, etc.)."""
     pass
@@ -83,7 +82,6 @@ class NoQuestionsAvailableError(RoundServiceError):
 
 def _resolve_game(game_or_id):
     if isinstance(game_or_id, Game):
-        game_or_id.refresh_from_db()
         return game_or_id
     try:
         return Game.objects.get(pk=int(game_or_id))
@@ -93,7 +91,6 @@ def _resolve_game(game_or_id):
 
 def _resolve_round(round_or_id):
     if isinstance(round_or_id, Round):
-        round_or_id.refresh_from_db()
         return round_or_id
     try:
         return Round.objects.select_related("game").get(pk=int(round_or_id))
@@ -103,7 +100,6 @@ def _resolve_round(round_or_id):
 
 def _resolve_player(player_or_id):
     if isinstance(player_or_id, GamePlayer):
-        player_or_id.refresh_from_db()
         return player_or_id
     try:
         return GamePlayer.objects.select_related("game", "user").get(pk=int(player_or_id))
@@ -141,6 +137,25 @@ def create_numeric_round(game_or_id, *, round_type=Round.CITY_CAPTURE, question=
             raise UnfinishedRoundExistsError(
                 f"Game #{game.id} already has an unfinished round. Only one unfinished round is permitted at a time."
             )
+
+        if game.territories.exists():
+            free_count = game.territories.filter(owner__isnull=True).count()
+            if free_count == 0:
+                from .capture_services import NoFreeTerritoriesError
+                raise NoFreeTerritoriesError("Cannot create city_capture round: all territories on the map have been captured.")
+
+            from .models import TerritorySelectionRight
+            pending_rights = TerritorySelectionRight.objects.filter(
+                round__game=game,
+                used_choices__lt=models.F("allocated_choices"),
+            ).exists()
+            if pending_rights:
+                from .capture_services import PendingSelectionRightsError
+                raise PendingSelectionRightsError("Cannot create new round while players have unexercised territory selection rights.")
+
+            target_places_str = "1,2" if free_count >= 3 else "1"
+        else:
+            target_places_str = "1,2"
 
         # Find used question IDs in this game
         used_q_ids = set(RoundQuestion.objects.filter(round__game=game).values_list("question_id", flat=True))
@@ -184,7 +199,7 @@ def create_numeric_round(game_or_id, *, round_type=Round.CITY_CAPTURE, question=
             correct_answer=chosen_question.correct_answer,
             order=1,
             status=RoundQuestion.PENDING,
-            target_places="1,2",
+            target_places=target_places_str,
         )
         initial_rq.target_players.set(game.players.all())
 
@@ -326,6 +341,59 @@ def submit_numeric_answer(round_or_id, player_or_id, value, *, timestamp=None):
         )
 
         return answer
+
+
+def _finalize_completed_round(round_obj, trusted_time, unresolved_reason=""):
+    round_obj.status = Round.COMPLETED
+    round_obj.completed_at = trusted_time
+    winner_rank = round_obj.rankings.filter(place=1).first()
+    round_obj.winner = winner_rank.player if winner_rank else None
+    round_obj.unresolved_reason = unresolved_reason
+    round_obj.save()
+
+    if round_obj.winner:
+        from .capture_services import WIN_REWARD
+        from .models import TerritorySelectionRight
+        round_obj.winner.score += WIN_REWARD
+        round_obj.winner.save(update_fields=["score"])
+
+        free_count = round_obj.game.territories.filter(owner__isnull=True).count()
+        second_place = round_obj.rankings.filter(place=2).first()
+
+        if free_count >= 3:
+            TerritorySelectionRight.objects.create(
+                round=round_obj,
+                player=round_obj.winner,
+                allocated_choices=2,
+                used_choices=0,
+                order=1,
+            )
+            if second_place:
+                TerritorySelectionRight.objects.create(
+                    round=round_obj,
+                    player=second_place.player,
+                    allocated_choices=1,
+                    used_choices=0,
+                    order=2,
+                )
+        elif free_count == 2:
+            TerritorySelectionRight.objects.create(
+                round=round_obj,
+                player=round_obj.winner,
+                allocated_choices=2,
+                used_choices=0,
+                order=1,
+            )
+        elif free_count == 1:
+            TerritorySelectionRight.objects.create(
+                round=round_obj,
+                player=round_obj.winner,
+                allocated_choices=1,
+                used_choices=0,
+                order=1,
+            )
+
+    return round_obj
 
 
 def evaluate_round(round_or_id, *, timestamp=None, next_question=None, seed=None):
@@ -495,23 +563,12 @@ def evaluate_round(round_or_id, *, timestamp=None, next_question=None, seed=None
         # Check if tie-breaker is required
         if not unresolved_places:
             # Everything required is resolved!
-            round_obj.status = Round.COMPLETED
-            round_obj.completed_at = trusted_time
-            winner_rank = round_obj.rankings.filter(place=1).first()
-            round_obj.winner = winner_rank.player if winner_rank else None
-            round_obj.save()
-            return round_obj
+            return _finalize_completed_round(round_obj, trusted_time)
 
         # Ties remain: check limits and question availability
         if current_q.order >= 3:
             # Reached max limit of 3 questions
-            round_obj.status = Round.COMPLETED
-            round_obj.completed_at = trusted_time
-            winner_rank = round_obj.rankings.filter(place=1).first()
-            round_obj.winner = winner_rank.player if winner_rank else None
-            round_obj.unresolved_reason = "question_limit_reached"
-            round_obj.save()
-            return round_obj
+            return _finalize_completed_round(round_obj, trusted_time, "question_limit_reached")
 
         # Need next question: find an unused question in this game
         used_q_ids = set(RoundQuestion.objects.filter(round__game=round_obj.game).values_list("question_id", flat=True))
@@ -534,13 +591,7 @@ def evaluate_round(round_or_id, *, timestamp=None, next_question=None, seed=None
 
         if not chosen_next_q:
             # Question bank is exhausted!
-            round_obj.status = Round.COMPLETED
-            round_obj.completed_at = trusted_time
-            winner_rank = round_obj.rankings.filter(place=1).first()
-            round_obj.winner = winner_rank.player if winner_rank else None
-            round_obj.unresolved_reason = "bank_exhausted"
-            round_obj.save()
-            return round_obj
+            return _finalize_completed_round(round_obj, trusted_time, "bank_exhausted")
 
         # Activate next question with fresh 10-second deadline
         next_order = current_q.order + 1

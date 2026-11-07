@@ -122,7 +122,10 @@ class RoundWorkflowTests(M6BaseTestCase):
         self.assertEqual(rankings[1].place, 2)
         self.assertEqual(rankings[1].player, self.p2)
 
-        # 5. Create round 2
+        # 5. After selection rights are exercised, create round 2
+        for s_right in round1.selection_rights.all():
+            s_right.used_choices = s_right.allocated_choices
+            s_right.save()
         round2 = create_numeric_round(self.game)
         self.assertEqual(round2.number, 2)
         self.assertEqual(self.game.get_current_round().id, round2.id)
@@ -647,3 +650,4 @@ class RoundConcurrencyBonusTests(M6BaseTestCase):
                     numeric_value=20,
                     submitted_at=t0 + timedelta(seconds=1),
                 )
+

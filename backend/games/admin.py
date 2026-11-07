@@ -8,6 +8,8 @@ from .models import (
     RoundQuestion,
     RoundRanking,
     Territory,
+    TerritoryCapture,
+    TerritorySelectionRight,
     WaitingPlayer,
 )
 
@@ -108,12 +110,36 @@ class RoundRankingInline(admin.TabularInline):
     extra = 0
 
 
+class TerritorySelectionRightInline(admin.TabularInline):
+    model = TerritorySelectionRight
+    extra = 0
+
+
+class TerritoryCaptureInline(admin.TabularInline):
+    model = TerritoryCapture
+    extra = 0
+
+
 @admin.register(Round)
 class RoundAdmin(admin.ModelAdmin):
     list_display = ("id", "game", "number", "status", "round_type", "winner", "started_at", "completed_at")
     list_filter = ("status", "round_type", "question_type")
     search_fields = ("game__id", "winner__user__username")
-    inlines = [RoundQuestionInline, RoundAnswerInline, RoundRankingInline]
+    inlines = [RoundQuestionInline, RoundAnswerInline, RoundRankingInline, TerritorySelectionRightInline, TerritoryCaptureInline]
+
+
+@admin.register(TerritorySelectionRight)
+class TerritorySelectionRightAdmin(admin.ModelAdmin):
+    list_display = ("id", "round", "player", "order", "allocated_choices", "used_choices")
+    list_filter = ("order",)
+    search_fields = ("player__user__username", "round__id")
+
+
+@admin.register(TerritoryCapture)
+class TerritoryCaptureAdmin(admin.ModelAdmin):
+    list_display = ("id", "round", "player", "territory", "choice_number", "points_awarded", "captured_at")
+    list_filter = ("choice_number",)
+    search_fields = ("player__user__username", "territory__name", "round__id")
 
 
 @admin.register(RoundQuestion)

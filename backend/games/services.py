@@ -224,3 +224,20 @@ from .round_services import (
     start_round,
     submit_numeric_answer,
 )
+
+# Re-export Capture & Scoring Operations & Exceptions for M07
+from .capture_services import (
+    CAPTURE_REWARD,
+    TERRITORY_SCORE_INCREMENT,
+    WIN_REWARD,
+    CaptureServiceError,
+    NoFreeTerritoriesError,
+    NoSelectionRightsError,
+    OutOfTurnSelectionError,
+    PendingSelectionRightsError,
+    TerritoryAlreadyOwnedError,
+    TerritoryNotAdjacentError,
+    choose_territory,
+    get_eligible_territories,
+    get_selection_status,
+)

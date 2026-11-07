@@ -596,3 +596,69 @@ class WaitingPlayer(models.Model):
         return self.user.username
 
 
+class TerritorySelectionRight(models.Model):
+    round = models.ForeignKey(
+        Round,
+        on_delete=models.CASCADE,
+        related_name="selection_rights",
+    )
+    player = models.ForeignKey(
+        GamePlayer,
+        on_delete=models.CASCADE,
+        related_name="selection_rights",
+    )
+    allocated_choices = models.PositiveSmallIntegerField(default=1)
+    used_choices = models.PositiveSmallIntegerField(default=0)
+    order = models.PositiveSmallIntegerField(default=1)
+
+    class Meta:
+        ordering = ["round", "order"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["round", "player"],
+                name="unique_round_player_selection_right",
+            ),
+            models.UniqueConstraint(
+                fields=["round", "order"],
+                name="unique_round_order_selection_right",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Right for {self.player.user.username} (Round #{self.round.number}, {self.used_choices}/{self.allocated_choices})"
+
+    @property
+    def remaining_choices(self):
+        return max(0, self.allocated_choices - self.used_choices)
+
+
+class TerritoryCapture(models.Model):
+    round = models.ForeignKey(
+        Round,
+        on_delete=models.CASCADE,
+        related_name="captures",
+    )
+    player = models.ForeignKey(
+        GamePlayer,
+        on_delete=models.CASCADE,
+        related_name="territory_captures",
+    )
+    territory = models.ForeignKey(
+        Territory,
+        on_delete=models.CASCADE,
+        related_name="captures",
+    )
+    choice_number = models.PositiveSmallIntegerField(default=1)
+    points_awarded = models.IntegerField(default=100)
+    territory_score_before = models.IntegerField(default=0)
+    territory_score_after = models.IntegerField(default=100)
+    captured_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["captured_at", "id"]
+
+    def __str__(self):
+        return f"{self.player.user.username} captured {self.territory.name} (+{self.points_awarded} pts)"
+
+
+
