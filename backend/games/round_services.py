@@ -7,6 +7,9 @@ from django.utils import timezone
 from questions.models import NumericQuestion
 from .models import Game, GamePlayer, Round, RoundAnswer, RoundQuestion, RoundRanking
 
+BATTLE = getattr(Round, "BATTLE", "battle")
+CAPITAL_ATTACK = getattr(Round, "CAPITAL_ATTACK", "capital_attack")
+
 
 class RoundServiceError(Exception):
     """Base exception for all round service layer operations."""
@@ -91,6 +94,8 @@ def _resolve_game(game_or_id):
 
 def _resolve_round(round_or_id):
     if isinstance(round_or_id, Round):
+        if round_or_id.pk:
+            round_or_id.refresh_from_db()
         return round_or_id
     try:
         return Round.objects.select_related("game").get(pk=int(round_or_id))
@@ -449,9 +454,170 @@ def evaluate_round(round_or_id, *, timestamp=None, next_question=None, seed=None
                 f"when only {len(answered_player_ids)}/{len(target_player_ids)} players have answered."
             )
 
+        # Atomic conditional status update (idempotency & concurrency guard)
+        affected = RoundQuestion.objects.filter(
+            pk=current_q.pk,
+            status=RoundQuestion.ACTIVE,
+        ).update(
+            status=RoundQuestion.COMPLETED,
+            completed_at=trusted_time,
+        )
+
+        if affected == 0:
+            # Question has already been completed by another process
+            return None
+
+        current_q.status = RoundQuestion.COMPLETED
+        current_q.completed_at = trusted_time
+
         target_places = [int(p) for p in current_q.target_places.split(",") if p.strip()]
 
-        # Sort answers by difference ASC, submitted_at ASC
+        CHOICE_TYPE = getattr(Round, "CHOICE", "choice")
+        q_type = getattr(current_q, "question_type", Round.NUMERIC)
+
+        if q_type == CHOICE_TYPE:
+            # Choice question evaluation (M08 Battles)
+            try:
+                from .battle_services import _finalize_battle_consequences
+            except ImportError:
+                _finalize_battle_consequences = None
+            from questions.models import ChoiceQuestion
+
+            correct_answers = [a for a in answers if a.is_correct]
+
+            if len(correct_answers) == 1:
+                # Exactly one correct answer: author wins immediately
+                winner = correct_answers[0].player
+                RoundRanking.objects.create(
+                    round=round_obj,
+                    player=winner,
+                    place=1,
+                    resolved_at_question=current_q,
+                    difference=0,
+                    submitted_at=correct_answers[0].submitted_at,
+                )
+                current_q.status = RoundQuestion.COMPLETED
+                current_q.completed_at = trusted_time
+                current_q.save()
+
+                if round_obj.round_type in (BATTLE, CAPITAL_ATTACK):
+                    return _finalize_battle_consequences(round_obj, winner, trusted_time)
+                return _finalize_completed_round(round_obj, trusted_time)
+
+            elif len(correct_answers) == 2:
+                # Both correct: next question must be NUMERIC for same two players
+                current_q.status = RoundQuestion.COMPLETED
+                current_q.completed_at = trusted_time
+                current_q.save()
+
+                if current_q.order >= 3:
+                    if round_obj.round_type in (BATTLE, CAPITAL_ATTACK):
+                        return _finalize_battle_consequences(round_obj, None, trusted_time, "question_limit_reached")
+                    return _finalize_completed_round(round_obj, trusted_time, "question_limit_reached")
+
+                used_num_ids = set(
+                    RoundQuestion.objects.filter(round__game=round_obj.game, numeric_question__isnull=False).values_list("numeric_question_id", flat=True)
+                )
+                used_num_ids.update(
+                    RoundQuestion.objects.filter(round__game=round_obj.game, question__isnull=False).values_list("question_id", flat=True)
+                )
+                used_num_ids.update(
+                    Round.objects.filter(game=round_obj.game, numeric_question__isnull=False).values_list("numeric_question_id", flat=True)
+                )
+
+                chosen_next_q = None
+                if next_question is not None:
+                    if not isinstance(next_question, NumericQuestion):
+                        raise InvalidAnswerValueError("Provided next_question must be an instance of NumericQuestion.")
+                    if next_question.id in used_num_ids:
+                        raise NoQuestionsAvailableError(f"Question #{next_question.id} already used in this game.")
+                    chosen_next_q = next_question
+                else:
+                    candidates = list(NumericQuestion.objects.exclude(id__in=used_num_ids).order_by("id"))
+                    if candidates:
+                        rng = random.Random(seed) if seed is not None else random
+                        chosen_next_q = rng.choice(candidates)
+
+                if not chosen_next_q:
+                    if round_obj.round_type in (BATTLE, CAPITAL_ATTACK):
+                        return _finalize_battle_consequences(round_obj, None, trusted_time, "bank_exhausted")
+                    return _finalize_completed_round(round_obj, trusted_time, "bank_exhausted")
+
+                next_order = current_q.order + 1
+                next_rq = RoundQuestion.objects.create(
+                    round=round_obj,
+                    numeric_question=chosen_next_q,
+                    question=chosen_next_q,
+                    question_type=Round.NUMERIC,
+                    question_text=chosen_next_q.text,
+                    correct_answer=chosen_next_q.correct_answer,
+                    order=next_order,
+                    status=RoundQuestion.ACTIVE,
+                    target_places="1",
+                    started_at=trusted_time,
+                    deadline=trusted_time + timedelta(seconds=10),
+                )
+                next_rq.target_players.set(target_players)
+                return round_obj
+
+            else:
+                # Zero correct (both wrong, or missing): next question must be CHOICE for same two players
+                current_q.status = RoundQuestion.COMPLETED
+                current_q.completed_at = trusted_time
+                current_q.save()
+
+                if current_q.order >= 3:
+                    if round_obj.round_type in (BATTLE, CAPITAL_ATTACK):
+                        return _finalize_battle_consequences(round_obj, None, trusted_time, "question_limit_reached")
+                    return _finalize_completed_round(round_obj, trusted_time, "question_limit_reached")
+
+                used_choice_ids = set(
+                    RoundQuestion.objects.filter(round__game=round_obj.game, choice_question__isnull=False).values_list("choice_question_id", flat=True)
+                )
+                used_choice_ids.update(
+                    Round.objects.filter(game=round_obj.game, choice_question__isnull=False).values_list("choice_question_id", flat=True)
+                )
+
+                chosen_next_q = None
+                if next_question is not None:
+                    if not isinstance(next_question, ChoiceQuestion):
+                        raise InvalidAnswerValueError("Provided next_question must be an instance of ChoiceQuestion.")
+                    if next_question.id in used_choice_ids:
+                        raise NoQuestionsAvailableError(f"Choice question #{next_question.id} already used in this game.")
+                    chosen_next_q = next_question
+                else:
+                    candidates = list(
+                        ChoiceQuestion.objects.exclude(id__in=used_choice_ids).prefetch_related("options").order_by("id")
+                    )
+                    valid_candidates = [
+                        q for q in candidates if q.options.count() == 4 and sum(1 for o in q.options.all() if o.is_correct) == 1
+                    ]
+                    if valid_candidates:
+                        rng = random.Random(seed) if seed is not None else random
+                        chosen_next_q = rng.choice(valid_candidates)
+
+                if not chosen_next_q:
+                    if round_obj.round_type in (BATTLE, CAPITAL_ATTACK):
+                        return _finalize_battle_consequences(round_obj, None, trusted_time, "bank_exhausted")
+                    return _finalize_completed_round(round_obj, trusted_time, "bank_exhausted")
+
+                next_order = current_q.order + 1
+                next_rq = RoundQuestion.objects.create(
+                    round=round_obj,
+                    choice_question=chosen_next_q,
+                    question_type=Round.CHOICE,
+                    question_text=chosen_next_q.text,
+                    correct_option=chosen_next_q.options.get(is_correct=True),
+                    order=next_order,
+                    status=RoundQuestion.ACTIVE,
+                    target_places="1",
+                    started_at=trusted_time,
+                    deadline=trusted_time + timedelta(seconds=10),
+                )
+                next_rq.target_players.set(target_players)
+                return round_obj
+
+        # Sort answers by difference ASC, submitted_at ASC (Numeric question branch)
         answers.sort(key=lambda a: (a.difference, a.submitted_at))
 
         # Group answers into equivalence tiers (identical difference AND identical submitted_at)
@@ -563,15 +729,31 @@ def evaluate_round(round_or_id, *, timestamp=None, next_question=None, seed=None
         # Check if tie-breaker is required
         if not unresolved_places:
             # Everything required is resolved!
+            if round_obj.round_type in (BATTLE, CAPITAL_ATTACK):
+                try:
+                    from .battle_services import _finalize_battle_consequences
+                    winner_rank = round_obj.rankings.filter(place=1).first()
+                    winner = winner_rank.player if winner_rank else None
+                    return _finalize_battle_consequences(round_obj, winner, trusted_time)
+                except ImportError:
+                    pass
             return _finalize_completed_round(round_obj, trusted_time)
 
         # Ties remain: check limits and question availability
         if current_q.order >= 3:
             # Reached max limit of 3 questions
+            if round_obj.round_type in (BATTLE, CAPITAL_ATTACK):
+                from .battle_services import _finalize_battle_consequences
+                return _finalize_battle_consequences(round_obj, None, trusted_time, "question_limit_reached")
             return _finalize_completed_round(round_obj, trusted_time, "question_limit_reached")
 
         # Need next question: find an unused question in this game
-        used_q_ids = set(RoundQuestion.objects.filter(round__game=round_obj.game).values_list("question_id", flat=True))
+        used_q_ids = set(
+            RoundQuestion.objects.filter(round__game=round_obj.game, numeric_question__isnull=False).values_list("numeric_question_id", flat=True)
+        )
+        used_q_ids.update(
+            RoundQuestion.objects.filter(round__game=round_obj.game, question__isnull=False).values_list("question_id", flat=True)
+        )
         used_q_ids.update(
             Round.objects.filter(game=round_obj.game, numeric_question__isnull=False).values_list("numeric_question_id", flat=True)
         )
@@ -591,13 +773,18 @@ def evaluate_round(round_or_id, *, timestamp=None, next_question=None, seed=None
 
         if not chosen_next_q:
             # Question bank is exhausted!
+            if round_obj.round_type in (BATTLE, CAPITAL_ATTACK):
+                from .battle_services import _finalize_battle_consequences
+                return _finalize_battle_consequences(round_obj, None, trusted_time, "bank_exhausted")
             return _finalize_completed_round(round_obj, trusted_time, "bank_exhausted")
 
         # Activate next question with fresh 10-second deadline
         next_order = current_q.order + 1
         next_rq = RoundQuestion.objects.create(
             round=round_obj,
+            numeric_question=chosen_next_q,
             question=chosen_next_q,
+            question_type=Round.NUMERIC,
             question_text=chosen_next_q.text,
             correct_answer=chosen_next_q.correct_answer,
             order=next_order,
@@ -632,6 +819,7 @@ def get_round_state(round_or_id, *, timestamp=None):
         current_q_data = {
             "id": current_q.id,
             "order": current_q.order,
+            "question_type": current_q.question_type,
             "status": current_q.status,
             "question_text": current_q.question_text,
             "started_at": current_q.started_at.isoformat() if current_q.started_at else None,
@@ -648,12 +836,15 @@ def get_round_state(round_or_id, *, timestamp=None):
                 "player": a.player.user.username,
                 "numeric_value": a.numeric_value,
                 "difference": a.difference,
+                "selected_option": a.selected_option.text if a.selected_option else None,
+                "is_correct": a.is_correct,
                 "submitted_at": a.submitted_at.isoformat() if a.submitted_at else None,
             }
             for a in q.answers.order_by("submitted_at")
         ]
         history.append({
             "order": q.order,
+            "question_type": q.question_type,
             "status": q.status,
             "question_text": q.question_text,
             "answers": q_answers,
